@@ -46,7 +46,7 @@ export default function NewSearch() {
   const [headcount, setHeadcount] = useState([]);
   const [keywords, setKeywords] = useState("");
   const [datePosted, setDatePosted] = useState("past_month");
-  const [limit, setLimit] = useState(10);
+ 
 
   // Schedule state
   const [scheduleEnabled, setScheduleEnabled] = useState(false);
@@ -164,7 +164,7 @@ export default function NewSearch() {
         services: cleanServices,
         icp,
         datePosted,
-        limit,
+        limit:20,
       },
     };
   }
@@ -237,9 +237,9 @@ export default function NewSearch() {
       </h1>
       <p className="text-sm text-gray-500 mb-4">
         {scheduleEnabled
-          ? `Runs automatically ${intervalLabel(intervalDays)}. Each run takes 10–30 minutes and returns up to ${limit} leads.`
-          : `A search takes 10–30 minutes. It returns up to ${limit} leads that pass the intent + ICP threshold.`}
-      </p>
+            ? `Runs automatically ${intervalLabel(intervalDays)}. Each run takes 10–30 minutes and returns up to 20 high-intent leads.`
+            : "A search takes 10–30 minutes. It returns up to 20 high-intent leads. Most searches return 1–5; a richer brief returns more."}
+        </p>
 
       {prefillSource && (
         <div className="bg-blue-50 border border-blue-200 rounded p-3 mb-4 flex items-start gap-3">
@@ -400,25 +400,6 @@ export default function NewSearch() {
                   </option>
                 ))}
               </select>
-            </div>
-            <div>
-              <label className="block text-sm font-medium mb-1">
-                Max leads
-              </label>
-              <select
-                value={limit}
-                onChange={(e) => setLimit(parseInt(e.target.value, 10))}
-                className="w-full px-3 py-2 border rounded bg-white"
-              >
-                {[5, 10, 15, 20].map((n) => (
-                  <option key={n} value={n}>
-                    {n}
-                  </option>
-                ))}
-              </select>
-              <p className="text-xs text-gray-500 mt-1">
-                Higher takes longer. 10 is a good balance.
-              </p>
             </div>
           </div>
         </div>
