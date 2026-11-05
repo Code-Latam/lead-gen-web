@@ -4,7 +4,7 @@ import { Link } from "react-router-dom";
 import { api } from "../api/client.js";
 import { useAuth } from "../auth/useAuth.js";
 import { useToast } from "../components/Toast.jsx";
-import { exportLeads } from "../lib/export.js";
+import { exportLeads, exportLeadsToPdf } from "../lib/export.js";
 
 const PAGE_SIZE = 200;
 
@@ -20,6 +20,7 @@ export default function Leads() {
   const [filterScore, setFilterScore] = useState("all");
   const [search, setSearch] = useState("");
   const [exporting, setExporting] = useState(false);
+  const [pdfExporting, setPdfExporting] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [sendOpen, setSendOpen] = useState(false);
 
@@ -100,6 +101,47 @@ export default function Leads() {
     }
   }
 
+  async function handleExportPdf() {
+    const rows = selectedLeads.length > 0 ? selectedLeads : filtered;
+    if (rows.length === 0) return;
+
+    // If a single job's leads are all selected, include that job's
+    // brief on the cover. Otherwise skip the brief block — mixed briefs
+    // would be misleading.
+    let brief = null;
+    const jobIds = new Set(rows.map((r) => r.jobId).filter(Boolean));
+    if (jobIds.size === 1) {
+      const jid = [...jobIds][0];
+      const firstLead = rows.find((r) => r.jobId === jid);
+      if (firstLead) {
+        brief = { services: [], icp: {} };
+      }
+      // Fetch full job to get the brief (leads only carry jobId, not brief)
+      try {
+        const jobData = await api.get(`/api/leadgen/jobs/${jid}`);
+        if (jobData.job?.input) {
+          brief = {
+            services: jobData.job.input.services || [],
+            icp: jobData.job.input.icp || {},
+          };
+        }
+      } catch {
+        // Non-fatal — PDF will just render without the brief block.
+        brief = null;
+      }
+    }
+
+    setPdfExporting(true);
+    try {
+      await exportLeadsToPdf(rows, { brief, filenameBase: "leads" });
+      toast(`Exported ${rows.length} lead${rows.length === 1 ? "" : "s"} to PDF.`, "success");
+    } catch (err) {
+      toast(err.message || "PDF export failed.", "error");
+    } finally {
+      setPdfExporting(false);
+    }
+  }
+
   async function handleDelete() {
     if (selectedLeads.length === 0) return;
 
@@ -111,8 +153,6 @@ export default function Leads() {
     );
     if (!ok) return;
 
-    // Group by jobId — the delete endpoint accepts one jobId per request
-    // (mirrors the send-to-mm pattern).
     const byJob = {};
     for (const lead of selectedLeads) {
       const j = lead.jobId;
@@ -154,9 +194,6 @@ export default function Leads() {
         }.`,
         failedJobs > 0 ? "info" : "success"
       );
-      // Optimistic local removal for the ones that succeeded. Simplest
-      // is to refetch — the server is the source of truth and this
-      // avoids drifting the aggregate view.
       clearSelection();
       fetchLeads();
     }
@@ -304,17 +341,24 @@ export default function Leads() {
             <div className="flex-1" />
             <button
               onClick={() => handleExport("xlsx")}
-              disabled={exporting || deleting}
+              disabled={exporting || pdfExporting || deleting}
               className="btn-secondary"
             >
               {exporting ? "Exporting…" : "Export Excel"}
             </button>
             <button
               onClick={() => handleExport("csv")}
-              disabled={exporting || deleting}
+              disabled={exporting || pdfExporting || deleting}
               className="btn-secondary"
             >
               Export CSV
+            </button>
+            <button
+              onClick={handleExportPdf}
+              disabled={exporting || pdfExporting || deleting}
+              className="btn-secondary"
+            >
+              {pdfExporting ? "Generating…" : "Export PDF"}
             </button>
             <button
               onClick={handleDelete}
