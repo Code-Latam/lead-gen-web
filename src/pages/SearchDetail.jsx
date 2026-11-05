@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api } from "../api/client.js";
 import { useToast } from "../components/Toast.jsx";
-import { exportLeads } from "../lib/export.js";
+import { exportLeads, exportLeadsToPdf } from "../lib/export.js";
 
 const POLL_MS = 10_000;
 
@@ -15,6 +15,7 @@ export default function SearchDetail() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [exporting, setExporting] = useState(false);
+  const [pdfExporting, setPdfExporting] = useState(false);
   const pollRef = useRef(null);
 
   async function fetchJob() {
@@ -79,6 +80,35 @@ export default function SearchDetail() {
     }
   }
 
+  async function handleExportPdf() {
+    if (!job?.output?.leads?.length) return;
+
+    // The detail page already has the brief in memory, so pass it
+    // straight through — no extra fetch like the Leads page needs.
+    const brief = {
+      services: job.input?.services || [],
+      icp: job.input?.icp || {},
+    };
+
+    setPdfExporting(true);
+    try {
+      await exportLeadsToPdf(job.output.leads, {
+        brief,
+        filenameBase: `search-${jobId.slice(0, 8)}`,
+      });
+      toast(
+        `Exported ${job.output.leads.length} lead${
+          job.output.leads.length === 1 ? "" : "s"
+        } to PDF.`,
+        "success"
+      );
+    } catch (err) {
+      toast(err.message || "PDF export failed.", "error");
+    } finally {
+      setPdfExporting(false);
+    }
+  }
+
   if (loading) {
     return (
       <div className="max-w-7xl mx-auto p-6 text-gray-500">Loading…</div>
@@ -106,8 +136,10 @@ export default function SearchDetail() {
     job.status === "queued" ||
     job.status === "processing" ||
     job.status === "processing_webhook_pending";
-  const isDone = job.status === "completed" || job.status === "completed_webhook_failed";
+  const isDone =
+    job.status === "completed" || job.status === "completed_webhook_failed";
   const isFailed = job.status === "failed";
+  const anyExporting = exporting || pdfExporting;
 
   return (
     <div className="max-w-7xl mx-auto p-6">
@@ -129,17 +161,24 @@ export default function SearchDetail() {
           <div className="flex items-center gap-2">
             <button
               onClick={() => handleExport("xlsx")}
-              disabled={exporting}
+              disabled={anyExporting}
               className="btn-primary"
             >
               {exporting ? "Exporting…" : "Export Excel"}
             </button>
             <button
               onClick={() => handleExport("csv")}
-              disabled={exporting}
+              disabled={anyExporting}
               className="btn-secondary"
             >
               Export CSV
+            </button>
+            <button
+              onClick={handleExportPdf}
+              disabled={anyExporting}
+              className="btn-secondary"
+            >
+              {pdfExporting ? "Generating…" : "Export PDF"}
             </button>
           </div>
         )}
