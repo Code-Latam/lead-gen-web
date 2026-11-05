@@ -20,6 +20,7 @@ export default function Leads() {
   const [filterScore, setFilterScore] = useState("all");
   const [search, setSearch] = useState("");
   const [exporting, setExporting] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const [sendOpen, setSendOpen] = useState(false);
 
   async function fetchLeads() {
@@ -96,6 +97,68 @@ export default function Leads() {
       toast(err.message || "Export failed.", "error");
     } finally {
       setExporting(false);
+    }
+  }
+
+  async function handleDelete() {
+    if (selectedLeads.length === 0) return;
+
+    const count = selectedLeads.length;
+    const ok = window.confirm(
+      `Delete ${count} lead${count === 1 ? "" : "s"}?\n\n` +
+        `This removes them from Intent Radar.\n` +
+        `Leads already sent to Meeting Maker are not affected.`
+    );
+    if (!ok) return;
+
+    // Group by jobId — the delete endpoint accepts one jobId per request
+    // (mirrors the send-to-mm pattern).
+    const byJob = {};
+    for (const lead of selectedLeads) {
+      const j = lead.jobId;
+      if (!j) continue;
+      if (!byJob[j]) byJob[j] = [];
+      byJob[j].push(lead.linkedinPublicId);
+    }
+
+    setDeleting(true);
+    let deleted = 0;
+    let failedJobs = 0;
+
+    for (const [jobId, leadIds] of Object.entries(byJob)) {
+      try {
+        const res = await api.post("/api/leadgen/leads/delete", {
+          jobId,
+          leadIds,
+        });
+        deleted += res.deleted || 0;
+      } catch (err) {
+        failedJobs++;
+        if (err.status === 409) {
+          toast(
+            "One or more of these leads belong to a search that is currently running. Wait for it to finish.",
+            "error"
+          );
+        } else {
+          toast(err.message || "Failed to delete some leads.", "error");
+        }
+      }
+    }
+
+    setDeleting(false);
+
+    if (deleted > 0) {
+      toast(
+        `Deleted ${deleted} lead${deleted === 1 ? "" : "s"}${
+          failedJobs > 0 ? ` (${failedJobs} search(es) failed)` : ""
+        }.`,
+        failedJobs > 0 ? "info" : "success"
+      );
+      // Optimistic local removal for the ones that succeeded. Simplest
+      // is to refetch — the server is the source of truth and this
+      // avoids drifting the aggregate view.
+      clearSelection();
+      fetchLeads();
     }
   }
 
@@ -241,22 +304,35 @@ export default function Leads() {
             <div className="flex-1" />
             <button
               onClick={() => handleExport("xlsx")}
-              disabled={exporting}
+              disabled={exporting || deleting}
               className="btn-secondary"
             >
               {exporting ? "Exporting…" : "Export Excel"}
             </button>
             <button
               onClick={() => handleExport("csv")}
-              disabled={exporting}
+              disabled={exporting || deleting}
               className="btn-secondary"
             >
               Export CSV
             </button>
+            <button
+              onClick={handleDelete}
+              disabled={selected.size === 0 || deleting}
+              className="btn-secondary"
+              title={
+                selected.size === 0
+                  ? "Select leads first"
+                  : "Delete selected leads"
+              }
+              style={{ color: selected.size === 0 ? undefined : "#b91c1c" }}
+            >
+              {deleting ? "Deleting…" : "Delete selected"}
+            </button>
             {hasMeetingMakerPlan ? (
               <button
                 onClick={() => setSendOpen(true)}
-                disabled={selected.size === 0}
+                disabled={selected.size === 0 || deleting}
                 className="btn-primary"
                 title={
                   selected.size === 0
@@ -286,8 +362,11 @@ export default function Leads() {
           onSuccess={(batchId) => {
             setSendOpen(false);
             clearSelection();
-            toast(`Sent ${selectedLeads.length} leads to Meeting Maker.`, "success");
-            fetchLeads(); // refresh to show sentStatus
+            toast(
+              `Sent ${selectedLeads.length} leads to Meeting Maker.`,
+              "success"
+            );
+            fetchLeads();
           }}
         />
       )}
@@ -304,7 +383,9 @@ function ScoreBadge({ score }) {
       ? "bg-yellow-100 text-yellow-800"
       : "bg-gray-100 text-gray-700";
   return (
-    <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${color}`}>
+    <span
+      className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${color}`}
+    >
       {score.toFixed(2)}
     </span>
   );
@@ -348,8 +429,6 @@ function SendToMmDialog({ leads, onClose, onSuccess }) {
     setSubmitting(true);
     setError("");
     try {
-      // Group by jobId — the send endpoint accepts one jobId per batch.
-      // For v1 we send each job's leads as a separate batch call.
       const byJob = {};
       for (const lead of leads) {
         const j = lead.jobId;
@@ -392,7 +471,9 @@ function SendToMmDialog({ leads, onClose, onSuccess }) {
           agent.
         </p>
 
-        {loadingAgents && <p className="text-sm text-gray-500">Loading agents…</p>}
+        {loadingAgents && (
+          <p className="text-sm text-gray-500">Loading agents…</p>
+        )}
 
         {!loadingAgents && agents.length === 0 && (
           <div className="bg-yellow-50 border border-yellow-200 text-yellow-800 rounded p-3 mb-4 text-sm">
@@ -425,16 +506,17 @@ function SendToMmDialog({ leads, onClose, onSuccess }) {
         )}
 
         <div className="flex items-center justify-end gap-2">
-          <button onClick={onClose} className="btn-secondary" disabled={submitting}>
+          <button
+            onClick={onClose}
+            className="btn-secondary"
+            disabled={submitting}
+          >
             Cancel
           </button>
           <button
             onClick={submit}
             disabled={
-              submitting ||
-              !agentId ||
-              loadingAgents ||
-              agents.length === 0
+              submitting || !agentId || loadingAgents || agents.length === 0
             }
             className="btn-primary"
           >

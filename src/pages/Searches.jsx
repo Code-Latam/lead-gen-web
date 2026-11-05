@@ -1,8 +1,8 @@
 // src/pages/Searches.jsx
-// src/pages/Searches.jsx
 import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { api } from "../api/client.js";
+import { useToast } from "../components/Toast.jsx";
 
 const POLL_MS = 10_000;
 
@@ -10,8 +10,10 @@ export default function Searches() {
   const [jobs, setJobs] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [deleting, setDeleting] = useState(new Set());
   const pollRef = useRef(null);
   const nav = useNavigate();
+  const toast = useToast();
 
   async function fetchJobs() {
     try {
@@ -32,7 +34,10 @@ export default function Searches() {
 
   useEffect(() => {
     const hasActive = jobs.some(
-      (j) => j.status === "queued" || j.status === "processing"
+      (j) =>
+        j.status === "queued" ||
+        j.status === "processing" ||
+        j.status === "processing_webhook_pending"
     );
     if (!hasActive) {
       if (pollRef.current) {
@@ -53,6 +58,51 @@ export default function Searches() {
 
   function goNew() {
     nav("/searches/new");
+  }
+
+  async function handleDelete(job) {
+    const leadCount =
+      job.status === "completed" ||
+      job.status === "completed_webhook_failed"
+        ? job.leadCount
+        : 0;
+    const leadLabel =
+      leadCount > 0
+        ? ` and its ${leadCount} lead${leadCount === 1 ? "" : "s"}`
+        : "";
+
+    const ok = window.confirm(
+      `Delete this search${leadLabel}?\n\nThis cannot be undone. Leads already sent to Meeting Maker are not affected.`
+    );
+    if (!ok) return;
+
+    setDeleting((prev) => new Set(prev).add(job.jobId));
+    try {
+      await api.delete(`/api/leadgen/jobs/${job.jobId}`);
+      // Optimistic removal from the list
+      setJobs((prev) => prev.filter((j) => j.jobId !== job.jobId));
+      toast("Search deleted.", "success");
+    } catch (err) {
+      if (err.status === 409) {
+        toast(
+          err.data?.message ||
+            "This search is currently running. Wait for it to finish before deleting.",
+          "error"
+        );
+      } else if (err.status === 404) {
+        // Already deleted elsewhere — clean up the row
+        setJobs((prev) => prev.filter((j) => j.jobId !== job.jobId));
+        toast("Search was already deleted.", "info");
+      } else {
+        toast(err.message || "Failed to delete search.", "error");
+      }
+    } finally {
+      setDeleting((prev) => {
+        const next = new Set(prev);
+        next.delete(job.jobId);
+        return next;
+      });
+    }
   }
 
   return (
@@ -82,7 +132,7 @@ export default function Searches() {
         <div className="card p-6 text-center text-gray-500">
           <p className="mb-3">No searches yet.</p>
           <p className="text-sm">
-            Click <strong>New Search</strong> to discover leads from LinkedIn.
+            Click <strong>New Search</strong> to discover leads.
           </p>
         </div>
       )}
@@ -97,56 +147,89 @@ export default function Searches() {
                 <th className="p-3">ICP</th>
                 <th className="p-3">Status</th>
                 <th className="p-3 text-right">Leads</th>
-                <th className="p-3"></th>
+                <th className="p-3 text-right"></th>
               </tr>
             </thead>
             <tbody>
-              {jobs.map((j) => (
-                <tr key={j.jobId} className="border-t">
-                  <td className="p-3 whitespace-nowrap text-gray-700">
-                    {formatDate(j.createdAt)}
-                  </td>
-                  <td className="p-3">
-                    <div className="truncate max-w-xs">
-                      {abbrev(j.services, 2)}
-                    </div>
-                  </td>
-                  <td className="p-3">
-                    <div className="truncate max-w-xs text-gray-600">
-                      {abbrevIcp(j.icp)}
-                    </div>
-                  </td>
-                  <td className="p-3">
-                    <StatusBadge status={j.status} />
-                  </td>
-                  <td className="p-3 text-right">
-                    {j.status === "completed" ||
-                    j.status === "completed_webhook_failed"
-                      ? j.leadCount
-                      : "—"}
-                  </td>
-                  <td className="p-3 text-right">
-                    {j.status === "completed" ||
-                    j.status === "completed_webhook_failed" ? (
-                      <Link
-                        to={`/searches/${j.jobId}`}
-                        className="text-blue-600 hover:underline text-sm"
-                      >
-                        View
-                      </Link>
-                    ) : j.status === "failed" ? (
-                      <Link
-                        to={`/searches/${j.jobId}`}
-                        className="text-red-600 hover:underline text-sm"
-                      >
-                        Error
-                      </Link>
-                    ) : (
-                      <span className="text-gray-400 text-sm">—</span>
-                    )}
-                  </td>
-                </tr>
-              ))}
+              {jobs.map((j) => {
+                const isInFlight =
+                  j.status === "processing" ||
+                  j.status === "processing_webhook_pending";
+                const isDeleting = deleting.has(j.jobId);
+                const hidden = j.deletedLeadCount || 0;
+                const canDelete = !isInFlight && !isDeleting;
+
+                return (
+                  <tr key={j.jobId} className="border-t">
+                    <td className="p-3 whitespace-nowrap text-gray-700">
+                      {formatDate(j.createdAt)}
+                    </td>
+                    <td className="p-3">
+                      <div className="truncate max-w-xs">
+                        {abbrev(j.services, 2)}
+                      </div>
+                    </td>
+                    <td className="p-3">
+                      <div className="truncate max-w-xs text-gray-600">
+                        {abbrevIcp(j.icp)}
+                      </div>
+                    </td>
+                    <td className="p-3">
+                      <StatusBadge status={j.status} />
+                    </td>
+                    <td className="p-3 text-right">
+                      {j.status === "completed" ||
+                      j.status === "completed_webhook_failed" ? (
+                        <span>
+                          {j.leadCount}
+                          {hidden > 0 && (
+                            <span className="text-gray-400 text-xs ml-1">
+                              ({hidden} hidden)
+                            </span>
+                          )}
+                        </span>
+                      ) : (
+                        "—"
+                      )}
+                    </td>
+                    <td className="p-3 text-right whitespace-nowrap">
+                      <div className="inline-flex items-center gap-2">
+                        {j.status === "completed" ||
+                        j.status === "completed_webhook_failed" ? (
+                          <Link
+                            to={`/searches/${j.jobId}`}
+                            className="text-blue-600 hover:underline text-sm"
+                          >
+                            View
+                          </Link>
+                        ) : j.status === "failed" ? (
+                          <Link
+                            to={`/searches/${j.jobId}`}
+                            className="text-red-600 hover:underline text-sm"
+                          >
+                            Error
+                          </Link>
+                        ) : (
+                          <span className="text-gray-400 text-sm">—</span>
+                        )}
+                        <button
+                          onClick={() => handleDelete(j)}
+                          disabled={!canDelete}
+                          className="text-red-600 hover:text-red-800 text-sm disabled:opacity-40 disabled:cursor-not-allowed"
+                          title={
+                            isInFlight
+                              ? "Cannot delete while the search is running"
+                              : "Delete this search"
+                          }
+                          aria-label="Delete"
+                        >
+                          {isDeleting ? "…" : "✕"}
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
