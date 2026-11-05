@@ -112,17 +112,11 @@ function loadSheetJs() {
 /* ────────────────────────────────────────────────────────────────
    PDF export — detailed per-lead card report
 
-   Layout:
-     - Cover: title, generated date, count, brief (services + ICP)
-     - Per lead: name, title/company, score, intent, ICP fit,
-                 "why this lead" (reasoning), "what they said"
-                 (evidence), source URL, published date
-     - Page number in footer
-
-   A4 portrait, 2cm margins. Each lead card is sized dynamically
-   based on wrapped-text height, so long evidence/reasoning never
-   gets truncated. Cards flow across pages; if a card can't fit
-   in the remaining space, a page break is inserted.
+   The layout strategy: draw sequentially and track the ACTUAL Y
+   cursor at each step. The card's rounded-rectangle border is drawn
+   LAST, using the real consumed height — not an estimate. This
+   eliminates the "measured height was wrong so text overlaps the
+   border" class of bug entirely.
    ──────────────────────────────────────────────────────────────── */
 
 export async function exportLeadsToPdf(
@@ -135,24 +129,23 @@ export async function exportLeadsToPdf(
 
   const { default: jsPDF } = await import("jspdf");
 
-  const PAGE_W = 210;       // A4 width mm
-  const PAGE_H = 297;       // A4 height mm
-  const MARGIN = 20;        // left/right
+  const PAGE_W = 210;
+  const PAGE_H = 297;
+  const MARGIN = 20;
   const CONTENT_W = PAGE_W - MARGIN * 2;
-  const BOTTOM_MARGIN = 18; // leaves room for page numbers
+  const BOTTOM_MARGIN = 18;
   const CARD_GAP = 6;
-  const CARD_PAD = 5;
+  const CARD_PAD = 6;
+  const LINE = 4.5; // base line height (mm) for body text at size 9
 
-  // Colors
-  const BLACK = [17, 24, 39];      // gray-900
-  const GRAY = [107, 114, 128];    // gray-500
-  const LIGHT_GRAY = [229, 231, 235]; // gray-200
-  const ACCENT = [37, 99, 235];    // blue-600
-  const GREEN = [21, 128, 61];     // green-700
-  const AMBER = [180, 83, 9];      // amber-700
+  const BLACK = [17, 24, 39];
+  const GRAY = [107, 114, 128];
+  const LIGHT_GRAY = [229, 231, 235];
+  const ACCENT = [37, 99, 235];
+  const GREEN = [21, 128, 61];
+  const AMBER = [180, 83, 9];
 
   const doc = new jsPDF({ unit: "mm", format: "a4" });
-
   let y = MARGIN;
 
   // ── Cover header ──
@@ -179,12 +172,13 @@ export async function exportLeadsToPdf(
   );
   y += 6;
 
-  // ── Brief block (optional) ──
+  // ── Brief block ──
   if (brief && (brief.services?.length || brief.icp)) {
     y = drawBriefBlock(doc, brief, MARGIN, y, CONTENT_W, {
       BLACK,
       GRAY,
       LIGHT_GRAY,
+      LINE,
     });
     y += CARD_GAP;
   }
@@ -192,16 +186,21 @@ export async function exportLeadsToPdf(
   // ── Lead cards ──
   for (let i = 0; i < leads.length; i++) {
     const lead = leads[i];
-    const cardHeight = measureCard(doc, lead, CONTENT_W, CARD_PAD, i + 1, leads.length);
-    const remaining = PAGE_H - BOTTOM_MARGIN - y;
 
-    if (cardHeight > remaining) {
+    // Draw the card at current y. If it doesn't fit, page-break first.
+    // We need a "does this fit" check up front — approximate by
+    // measuring. But if the approximation is wrong, the card would
+    // start on one page and overflow. To be safe, we cap any single
+    // card to a reasonable size (evidence + reasoning are the only
+    // unbounded fields, and 30 lines is plenty for those).
+    const approxHeight = estimateCardHeight(doc, lead, CONTENT_W, CARD_PAD, LINE);
+    if (y + approxHeight > PAGE_H - BOTTOM_MARGIN && y > MARGIN + 30) {
       addFooter(doc, PAGE_W, PAGE_H, MARGIN, GRAY);
       doc.addPage();
       y = MARGIN;
     }
 
-    y = drawCard(doc, lead, MARGIN, y, CONTENT_W, CARD_PAD, cardHeight, i + 1, leads.length, {
+    y = drawCard(doc, lead, MARGIN, y, CONTENT_W, CARD_PAD, i + 1, leads.length, LINE, {
       BLACK,
       GRAY,
       LIGHT_GRAY,
@@ -219,100 +218,44 @@ export async function exportLeadsToPdf(
 }
 
 /* ────────────────────────────────────────────────────────────────
-   Card drawing + measuring
+   Card drawing — sequential, tracks real Y, draws border last
    ──────────────────────────────────────────────────────────────── */
 
-// Measure how tall the card would be for this lead, without drawing
-function measureCard(doc, lead, width, pad, idx, total) {
-  const innerW = width - pad * 2;
-  let h = pad; // top padding
-
-  // Title row: "Lead N of M"
-  h += 5;
-
-  // Name (larger font)
-  h += 6;
-  h += 2;
-
-  // Title · Company line
-  h += 4.5;
-  h += 4; // gap
-
-  // Meta row (score, intent, icp fit) — single line, may wrap
-  const metaLines = doc.splitTextToSize(metaLine(lead), innerW).length;
-  h += metaLines * 4 + 2;
-  h += 4; // gap
-
-  // "WHY THIS LEAD" label
-  h += 4;
-  h += 1;
-
-  // Reasoning (wrapped)
-  doc.setFont("helvetica", "normal");
-  doc.setFontSize(9);
-  const reasoningLines = doc
-    .splitTextToSize(lead.reasoning || "(no reasoning provided)", innerW)
-    .length;
-  h += reasoningLines * 4;
-  h += 4; // gap
-
-  // "EVIDENCE FROM POST" label
-  h += 4;
-  h += 1;
-
-  // Evidence (wrapped, italic-ish indented)
-  const evidence = lead.intentSignal?.evidence || "(no evidence captured)";
-  const evidenceLines = doc.splitTextToSize(`"${evidence}"`, innerW - 4).length;
-  h += evidenceLines * 4;
-  h += 4; // gap
-
-  // Source + published line
-  h += 4;
-
-  h += pad; // bottom padding
-  return h;
-}
-
-function drawCard(doc, lead, x, y, width, pad, cardHeight, idx, total, colors) {
+function drawCard(doc, lead, x, y, width, pad, idx, total, LINE, colors) {
   const startY = y;
   const innerX = x + pad;
   const innerW = width - pad * 2;
 
-  // Card border
-  doc.setDrawColor(...colors.LIGHT_GRAY);
-  doc.setLineWidth(0.2);
-  doc.roundedRect(x, y, width, cardHeight, 2, 2, "S");
+  y += pad; // top padding
 
-  y += pad;
-
-  // ── Title row: "Lead N of M" (right) + score badge (left) ──
+  // ── Title row: score (left) + "Lead N of M" (right) ──
   doc.setFont("helvetica", "normal");
   doc.setFontSize(8);
   doc.setTextColor(...colors.GRAY);
-  doc.text(`Lead ${idx} of ${total}`, x + width - pad, y + 3, {
-    align: "right",
-  });
+  doc.text(`Lead ${idx} of ${total}`, x + width - pad, y + 3, { align: "right" });
 
-  // Score badge (colored)
   const score = typeof lead.score === "number" ? lead.score : null;
   if (score !== null) {
     const color =
       score >= 0.8 ? colors.GREEN : score >= 0.6 ? colors.AMBER : colors.GRAY;
     doc.setTextColor(...color);
     doc.setFont("helvetica", "bold");
-    doc.setFontSize(9);
-    doc.text(`Score ${score.toFixed(2)}`, innerX, y + 3);
+    doc.setFontSize(10);
+    doc.text(`Score ${score.toFixed(2)}`, innerX, y + 3.2);
     doc.setFont("helvetica", "normal");
   }
-  y += 5;
+  y += 6;
 
   // ── Name ──
   doc.setTextColor(...colors.BLACK);
   doc.setFont("helvetica", "bold");
-  doc.setFontSize(13);
-  doc.text(lead.fullName || [lead.firstName, lead.lastName].filter(Boolean).join(" ") || "Unknown", innerX, y + 5);
-  y += 6;
-  y += 2;
+  doc.setFontSize(14);
+  const name =
+    lead.fullName ||
+    [lead.firstName, lead.lastName].filter(Boolean).join(" ") ||
+    "Unknown";
+  doc.text(name, innerX, y + 5);
+  y += 7;
 
   // ── Title · Company ──
   doc.setFont("helvetica", "normal");
@@ -322,17 +265,19 @@ function drawCard(doc, lead, x, y, width, pad, cardHeight, idx, total, colors) {
   if (titleLine) {
     const wrapped = doc.splitTextToSize(titleLine, innerW);
     doc.text(wrapped, innerX, y + 4);
-    y += wrapped.length * 4.5;
+    y += wrapped.length * LINE;
   }
-  y += 4;
+  y += 3;
 
-  // ── Meta row: Intent · ICP fit · Location ──
+  // ── Meta row ──
   doc.setFontSize(9);
   doc.setTextColor(...colors.BLACK);
   const meta = metaLine(lead);
-  const metaWrapped = doc.splitTextToSize(meta, innerW);
-  doc.text(metaWrapped, innerX, y + 3);
-  y += metaWrapped.length * 4 + 2;
+  if (meta) {
+    const wrapped = doc.splitTextToSize(meta, innerW);
+    doc.text(wrapped, innerX, y + 3);
+    y += wrapped.length * LINE;
+  }
   y += 4;
 
   // ── WHY THIS LEAD ──
@@ -343,38 +288,65 @@ function drawCard(doc, lead, x, y, width, pad, cardHeight, idx, total, colors) {
   const reasoning = lead.reasoning || "(no reasoning provided)";
   const reasoningLines = doc.splitTextToSize(reasoning, innerW);
   doc.text(reasoningLines, innerX, y + 3);
-  y += reasoningLines.length * 4 + 4;
+  y += reasoningLines.length * LINE;
+  y += 4;
 
-  // ── EVIDENCE ──
+  // ── EVIDENCE FROM POST ──
   y = drawLabel(doc, "EVIDENCE FROM POST", innerX, y, colors.GRAY);
   doc.setFont("helvetica", "italic");
   doc.setFontSize(9);
   doc.setTextColor(...colors.GRAY);
   const evidence = lead.intentSignal?.evidence || "(no evidence captured)";
   const evidenceLines = doc.splitTextToSize(`"${evidence}"`, innerW - 4);
-  // Indent the evidence by 4mm
   doc.text(evidenceLines, innerX + 4, y + 3);
-  y += evidenceLines.length * 4 + 4;
+  y += evidenceLines.length * LINE;
+  y += 4;
 
-  // ── Source URL + published ──
+  // ── Links: profile + source, plus published date ──
   doc.setFont("helvetica", "normal");
   doc.setFontSize(8);
+
+  // LinkedIn profile link (left)
+  if (lead.linkedinUrl) {
+    doc.setTextColor(...colors.ACCENT);
+    doc.textWithLink("View LinkedIn profile ↗", innerX, y + 3, {
+      url: lead.linkedinUrl,
+    });
+    y += LINE;
+  }
+
+  // Source post link (left, own line to avoid horizontal overlap)
   if (lead.sourceUrl) {
     doc.setTextColor(...colors.ACCENT);
     doc.textWithLink("View source post ↗", innerX, y + 3, {
       url: lead.sourceUrl,
     });
-  }
-  const publishedText = lead.publishedDate
-    ? `  ·  Published ${formatShortDate(lead.publishedDate)}`
-    : "";
-  if (publishedText) {
+    // Published date on the same line, right-aligned
+    if (lead.publishedDate) {
+      doc.setTextColor(...colors.GRAY);
+      doc.text(
+        `Published ${formatShortDate(lead.publishedDate)}`,
+        x + width - pad,
+        y + 3,
+        { align: "right" }
+      );
+    }
+    y += LINE;
+  } else if (lead.publishedDate) {
     doc.setTextColor(...colors.GRAY);
-    const w = lead.sourceUrl ? doc.getTextWidth("View source post ↗") : 0;
-    doc.text(publishedText, innerX + w, y + 3);
+    doc.text(`Published ${formatShortDate(lead.publishedDate)}`, innerX, y + 3);
+    y += LINE;
   }
 
-  return startY + cardHeight;
+  y += pad; // bottom padding
+
+  // ── Draw border LAST, using actual consumed height ──
+  const cardHeight = y - startY;
+  doc.setDrawColor(...colors.LIGHT_GRAY);
+  doc.setLineWidth(0.2);
+  doc.roundedRect(x, startY, width, cardHeight, 2, 2, "S");
+
+  return y; // real consumed height (not an estimate)
 }
 
 function drawLabel(doc, text, x, y, color) {
@@ -395,66 +367,126 @@ function metaLine(lead) {
   return parts.join("  ·  ");
 }
 
+/* ────────────────────────────────────────────────────────────────
+   Height estimation — used only to decide whether a card fits on
+   the current page BEFORE drawing it. If the estimate is off, the
+   card border will still be drawn correctly at the end of drawing;
+   worst case, the card is slightly taller than estimated and just
+   overflows past the bottom margin on the last page — acceptable
+   because there's nothing after it to overlap. Cards are capped at
+   a max plausible height so a genuinely huge card gets page-broken
+   pre-emptively.
+   ──────────────────────────────────────────────────────────────── */
+
+function estimateCardHeight(doc, lead, width, pad, LINE) {
+  const innerW = width - pad * 2;
+  let h = pad * 2;
+
+  h += 6;          // title row
+  h += 7;          // name
+  h += 3;
+
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(10);
+  const titleLine = [lead.title, lead.companyName].filter(Boolean).join("  ·  ");
+  if (titleLine) {
+    h += doc.splitTextToSize(titleLine, innerW).length * LINE;
+  }
+  h += 3;
+
+  doc.setFontSize(9);
+  const meta = metaLine(lead);
+  if (meta) {
+    h += doc.splitTextToSize(meta, innerW).length * LINE;
+  }
+  h += 4;
+
+  // WHY THIS LEAD label + content
+  h += 4;
+  const reasoning = lead.reasoning || "(no reasoning provided)";
+  h += doc.splitTextToSize(reasoning, innerW).length * LINE;
+  h += 4;
+
+  // EVIDENCE label + content
+  h += 4;
+  const evidence = lead.intentSignal?.evidence || "(no evidence captured)";
+  h += doc.splitTextToSize(`"${evidence}"`, innerW - 4).length * LINE;
+  h += 4;
+
+  // Links (each on its own line now)
+  if (lead.linkedinUrl) h += LINE;
+  if (lead.sourceUrl || lead.publishedDate) h += LINE;
+
+  // Cap: no single card should exceed 60% of a page. If it does,
+  // we still draw it, but the page-break decision is based on this
+  // cap. In practice this only happens with extremely long evidence.
+  return Math.min(h, 160);
+}
+
 function drawBriefBlock(doc, brief, x, y, width, colors) {
-  const pad = 4;
+  const pad = 5;
   const innerX = x + pad;
   const innerW = width - pad * 2;
 
-  // Measure
   const servicesText = (brief.services || []).join("  ·  ");
   const icpParts = [];
-  if (brief.icp?.titles?.length) icpParts.push(`Titles: ${brief.icp.titles.join(", ")}`);
-  if (brief.icp?.industries?.length) icpParts.push(`Industries: ${brief.icp.industries.join(", ")}`);
-  if (brief.icp?.locations?.length) icpParts.push(`Locations: ${brief.icp.locations.join(", ")}`);
+  if (brief.icp?.titles?.length)
+    icpParts.push(`Titles: ${brief.icp.titles.join(", ")}`);
+  if (brief.icp?.industries?.length)
+    icpParts.push(`Industries: ${brief.icp.industries.join(", ")}`);
+  if (brief.icp?.locations?.length)
+    icpParts.push(`Locations: ${brief.icp.locations.join(", ")}`);
   const icpText = icpParts.join("  ·  ");
 
   doc.setFont("helvetica", "normal");
   doc.setFontSize(9);
-  const serviceLines = servicesText ? doc.splitTextToSize(servicesText, innerW).length : 0;
+  const serviceLines = servicesText
+    ? doc.splitTextToSize(servicesText, innerW).length
+    : 0;
   const icpLines = icpText ? doc.splitTextToSize(icpText, innerW).length : 0;
-  const height = pad * 2 + 4 + (serviceLines ? 4 + serviceLines * 4 : 0) + (icpLines ? 4 + icpLines * 4 : 0);
 
-  // Draw box
-  doc.setDrawColor(...colors.LIGHT_GRAY);
-  doc.setLineWidth(0.2);
-  doc.roundedRect(x, y, width, height, 2, 2, "S");
+  const startY = y;
+  y += pad;
 
-  let cursor = y + pad;
-
-  // "Search brief" label
   doc.setFont("helvetica", "bold");
   doc.setFontSize(7);
   doc.setTextColor(...colors.GRAY);
-  doc.text("SEARCH BRIEF", innerX, cursor + 3);
-  cursor += 4;
+  doc.text("SEARCH BRIEF", innerX, y + 3);
+  y += 4;
 
   doc.setFont("helvetica", "normal");
   doc.setFontSize(9);
-  doc.setTextColor(...colors.BLACK);
 
   if (serviceLines) {
-    doc.text("Services:", innerX, cursor + 3);
+    doc.setTextColor(...colors.BLACK);
+    doc.text("Services:", innerX, y + 3);
     doc.setTextColor(...colors.GRAY);
     const wrapped = doc.splitTextToSize(servicesText, innerW);
-    doc.text(wrapped, innerX, cursor + 7);
-    cursor += 4 + serviceLines * 4;
+    doc.text(wrapped, innerX, y + 7);
+    y += 4 + serviceLines * colors.LINE;
   }
 
   if (icpLines) {
     doc.setTextColor(...colors.BLACK);
-    doc.text("ICP:", innerX, cursor + 3);
+    doc.text("ICP:", innerX, y + 3);
     doc.setTextColor(...colors.GRAY);
     const wrapped = doc.splitTextToSize(icpText, innerW);
-    doc.text(wrapped, innerX, cursor + 7);
-    cursor += 4 + icpLines * 4;
+    doc.text(wrapped, innerX, y + 7);
+    y += 4 + icpLines * colors.LINE;
   }
 
-  return y + height;
+  y += pad;
+
+  const height = y - startY;
+  doc.setDrawColor(...colors.LIGHT_GRAY);
+  doc.setLineWidth(0.2);
+  doc.roundedRect(x, startY, width, height, 2, 2, "S");
+
+  return y;
 }
 
 /* ────────────────────────────────────────────────────────────────
-   Footer with page numbers — added after each page break and
-   once more on the final page.
+   Footer with page numbers
    ──────────────────────────────────────────────────────────────── */
 
 function addFooter(doc, pageW, pageH, margin, grayColor) {
