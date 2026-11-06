@@ -83,8 +83,6 @@ export default function SearchDetail() {
   async function handleExportPdf() {
     if (!job?.output?.leads?.length) return;
 
-    // The detail page already has the brief in memory, so pass it
-    // straight through — no extra fetch like the Leads page needs.
     const brief = {
       services: job.input?.services || [],
       icp: job.input?.icp || {},
@@ -140,6 +138,12 @@ export default function SearchDetail() {
     job.status === "completed" || job.status === "completed_webhook_failed";
   const isFailed = job.status === "failed";
   const anyExporting = exporting || pdfExporting;
+
+  // DeepSeek indicator — only show in the running block when it
+  // actually contributed something.
+  const deepseekQueries = stats.deepseekQueries || 0;
+  const deepseekFetched = stats.deepseekLeadsFetched || 0;
+  const hasDeepseek = deepseekQueries > 0;
 
   return (
     <div className="max-w-7xl mx-auto p-6">
@@ -213,6 +217,12 @@ export default function SearchDetail() {
               {stats.postsReturned > 0 ? "✓" : "·"} LinkedIn posts searched
               {stats.postsReturned > 0 && ` (${stats.postsReturned})`}
             </li>
+            {hasDeepseek && (
+              <li>
+                {deepseekFetched > 0 ? "✓" : "·"} Web-search results
+                {deepseekFetched > 0 && ` (${deepseekFetched})`}
+              </li>
+            )}
             <li>
               {stats.scored > 0 ? "✓" : "·"} Posts scored with AI
               {stats.scored > 0 && ` (${stats.scored})`}
@@ -244,10 +254,8 @@ export default function SearchDetail() {
           <div className="card p-4 mb-4 bg-green-50 border-green-200">
             <p className="text-sm">
               <strong>{leads.length}</strong> lead
-              {leads.length === 1 ? "" : "s"} found from{" "}
-              <strong>{stats.uniquePosts || 0}</strong> unique posts ·{" "}
-              {stats.passedIntent || 0} had intent ·{" "}
-              {stats.passedScore || 0} passed the score threshold
+              {leads.length === 1 ? "" : "s"} found ·{" "}
+              <SourceSummary stats={stats} />
             </p>
           </div>
 
@@ -310,6 +318,59 @@ function LeadsTable({ leads }) {
         </tbody>
       </table>
     </div>
+  );
+}
+
+/**
+ * Renders the "from N unique posts · M had intent · K passed..." line.
+ *
+ * - Old jobs (pre-DeepSeek): deepseekQueries === 0 or undefined → legacy wording
+ * - New jobs where DeepSeek contributed 0 leads: still legacy wording
+ * - New jobs where DeepSeek contributed ≥1 lead: mention web-search results
+ *
+ * Handles old jobs gracefully because they don't have the deepseek* stats.
+ */
+function SourceSummary({ stats }) {
+  const uniquePosts = stats.uniquePosts || 0;
+  const passedIntent = stats.passedIntent || 0;
+  const unipilePassed = stats.passedScore || 0;
+  const deepseekFetched = stats.deepseekLeadsFetched || 0;
+  const deepseekPassed = stats.deepseekPassed || 0;
+
+  // Determine whether web search contributed anything to this job.
+  // If not, fall back to the legacy wording so old jobs render unchanged
+  // and new jobs where DeepSeek failed don't show "+ 0 web results".
+  const hasWebContrib =
+    deepseekFetched > 0 && (deepseekPassed > 0 || unipilePassed > 0 || true);
+
+  // Legacy path (also covers any job where DeepSeek returned nothing)
+  if (!hasWebContrib) {
+    return (
+      <>
+        from <strong>{uniquePosts}</strong> unique posts ·{" "}
+        {passedIntent} had intent · <strong>{unipilePassed}</strong> passed
+        the score threshold
+      </>
+    );
+  }
+
+  // New path — both sources contributed.
+  const passedParts = [];
+  if (unipilePassed > 0) passedParts.push(`${unipilePassed} from LinkedIn`);
+  if (deepseekPassed > 0) passedParts.push(`${deepseekPassed} from web search`);
+
+  return (
+    <>
+      from <strong>{uniquePosts}</strong> LinkedIn post
+      {uniquePosts === 1 ? "" : "s"} + <strong>{deepseekFetched}</strong>{" "}
+      web-search result{deepseekFetched === 1 ? "" : "s"}
+      {passedParts.length > 0 && (
+        <>
+          {" "}· <strong>{unipilePassed + deepseekPassed}</strong> passed the
+          score threshold ({passedParts.join(" + ")})
+        </>
+      )}
+    </>
   );
 }
 
