@@ -21,6 +21,7 @@ import Searches from "./pages/Searches.jsx";
 import NewSearch from "./pages/NewSearch.jsx";
 import SearchDetail from "./pages/SearchDetail.jsx";
 import Leads from "./pages/Leads.jsx";
+import Schedules from "./pages/Schedules.jsx";   // ← NEW
 
 function RequireAuth({ children }) {
   const { isAuthenticated, loading, isSubscribed } = useAuth();
@@ -101,6 +102,14 @@ export default function App() {
             element={
               <RequireAuth>
                 <SearchDetail />
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/schedules"
+            element={
+              <RequireAuth>
+                <Schedules />
               </RequireAuth>
             }
           />
