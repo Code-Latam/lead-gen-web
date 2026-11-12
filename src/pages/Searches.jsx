@@ -158,6 +158,7 @@ export default function Searches() {
                 const isDeleting = deleting.has(j.jobId);
                 const hidden = j.deletedLeadCount || 0;
                 const canDelete = !isInFlight && !isDeleting;
+                const isAutoSend = j.autoSendToMeetingMaker === true;
 
                 return (
                   <tr key={j.jobId} className="border-t">
@@ -175,7 +176,10 @@ export default function Searches() {
                       </div>
                     </td>
                     <td className="p-3">
-                      <StatusBadge status={j.status} />
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <StatusBadge status={j.status} />
+                        {isAutoSend && <AutoSendBadge />}
+                      </div>
                     </td>
                     <td className="p-3 text-right">
                       {j.status === "completed" ||
@@ -257,6 +261,25 @@ function StatusBadge({ status }) {
   return (
     <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${s.cls}`}>
       {s.label}
+    </span>
+  );
+}
+
+/**
+ * Small pill shown next to StatusBadge when the job was created
+ * with autoSendToMeetingMaker: true. Conveys intent, not outcome —
+ * a running job with auto-send on already shows this so the user
+ * knows the leads are headed to Meeting Maker when it finishes.
+ * Outcome (created / duplicate / error counts) is shown on the
+ * detail page.
+ */
+function AutoSendBadge() {
+  return (
+    <span
+      className="inline-block px-2 py-0.5 rounded text-xs font-medium bg-blue-50 text-blue-700 border border-blue-200"
+      title="This search will auto-send its leads to Meeting Maker when it completes"
+    >
+      🤖 Auto-sent
     </span>
   );
 }

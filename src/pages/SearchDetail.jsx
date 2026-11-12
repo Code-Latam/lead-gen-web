@@ -139,6 +139,10 @@ export default function SearchDetail() {
   const isFailed = job.status === "failed";
   const anyExporting = exporting || pdfExporting;
 
+  // Auto-send context for this job
+  const isAutoSend = job.input?.autoSendToMeetingMaker === true;
+  const autoSendStats = stats.autoSend || null;
+
   // DeepSeek indicator — only show in the running block when it
   // actually contributed something.
   const deepseekQueries = stats.deepseekQueries || 0;
@@ -197,6 +201,24 @@ export default function SearchDetail() {
           <strong>ICP:</strong> {formatIcp(job.input?.icp)}
         </p>
       </div>
+
+      {/* ── Auto-send status banner ──
+          Three states:
+            1. Running + auto-send armed → blue "will send when done" note
+            2. Done + auto-send completed successfully (or partial) → green
+            3. Done + auto-send failed (0 created) → red
+          Non-auto-send jobs render nothing here. */}
+      {isAutoSend && isRunning && <AutoSendArmedBanner />}
+      {isAutoSend && isDone && (
+        <AutoSendResultBanner
+          stats={autoSendStats}
+          personsCreatedCount={
+            Array.isArray(job.output?.personsCreated)
+              ? job.output.personsCreated.length
+              : 0
+          }
+        />
+      )}
 
       {isRunning && (
         <div className="card p-6 mb-4">
@@ -269,6 +291,103 @@ export default function SearchDetail() {
           )}
         </>
       )}
+    </div>
+  );
+}
+
+/**
+ * Shown while a job with autoSendToMeetingMaker:true is still
+ * running. Tells the user what's about to happen so they aren't
+ * surprised when Persons appear in Meeting Maker without them
+ * clicking anything.
+ */
+function AutoSendArmedBanner() {
+  return (
+    <div className="bg-blue-50 border border-blue-200 rounded p-3 mb-4 text-sm text-blue-900">
+      🤖 <strong>Auto-send armed.</strong> When this search finishes, the
+      leads will be added to Meeting Maker automatically and assigned to the
+      agent you selected.
+    </div>
+  );
+}
+
+/**
+ * Shown on a completed job with autoSendToMeetingMaker:true.
+ *
+ * Reads counts from job.output.stats.autoSend.counts, which the
+ * worker writes (see intentDiscoveryService.js). Falls back to a
+ * simple "N leads sent" line for jobs that predate this change
+ * (no stats.autoSend block) but somehow have the flag set — which
+ * shouldn't happen in practice, but costs nothing to defend
+ * against.
+ */
+function AutoSendResultBanner({ stats, personsCreatedCount }) {
+  // Fallback path — no stats block available (legacy job).
+  if (!stats) {
+    if (personsCreatedCount === 0) return null;
+    return (
+      <div className="bg-green-50 border border-green-200 rounded p-3 mb-4 text-sm text-green-900">
+        🤖 <strong>Sent to Meeting Maker:</strong> {personsCreatedCount} lead
+        {personsCreatedCount === 1 ? "" : "s"} created.
+      </div>
+    );
+  }
+
+  const { status, counts } = stats;
+  const created = counts?.created || 0;
+  const duplicate = counts?.duplicate || 0;
+  const invalid = counts?.invalid || 0;
+  const errorCount = counts?.error || 0;
+
+  // Failed: nothing was created at all.
+  if (status === "failed" && created === 0) {
+    const detail = [];
+    if (invalid > 0)
+      detail.push(`${invalid} could not be matched to a LinkedIn profile`);
+    if (errorCount > 0) detail.push(`${errorCount} failed with an error`);
+
+    return (
+      <div className="bg-red-50 border border-red-200 text-red-800 rounded p-3 mb-4 text-sm">
+        <p>
+          🤖 <strong>Auto-send failed.</strong> 0 leads could be added to
+          Meeting Maker.
+          {detail.length > 0 && ` (${detail.join("; ")})`}
+        </p>
+        <p className="text-xs mt-1 text-red-700">
+          Check that the selected agent is still active and configured. If the
+          problem persists, try sending the leads manually from this page.
+        </p>
+      </div>
+    );
+  }
+
+  // Success / partial.
+  const parts = [];
+  if (created > 0)
+    parts.push(
+      `${created} lead${created === 1 ? "" : "s"} created`
+    );
+  if (duplicate > 0)
+    parts.push(
+      `${duplicate} already existed in Meeting Maker`
+    );
+  if (invalid > 0)
+    parts.push(`${invalid} skipped (no LinkedIn profile)`);
+  if (errorCount > 0) parts.push(`${errorCount} failed`);
+
+  // Determine tone: green if no failures, yellow if partial.
+  const hasFailures = invalid > 0 || errorCount > 0;
+  const cls = hasFailures
+    ? "bg-yellow-50 border-yellow-200 text-yellow-900"
+    : "bg-green-50 border-green-200 text-green-900";
+
+  const heading = hasFailures
+    ? "Auto-sent to Meeting Maker (partial)"
+    : "Auto-sent to Meeting Maker";
+
+  return (
+    <div className={`${cls} border rounded p-3 mb-4 text-sm`}>
+      🤖 <strong>{heading}:</strong> {parts.join(" · ")}.
     </div>
   );
 }

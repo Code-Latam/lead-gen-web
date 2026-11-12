@@ -33,6 +33,32 @@ const INTERVAL_OPTIONS = [
   { value: 30, label: "Every month" },
 ];
 
+const ALLOWED_BDR_ROLES = [
+  "business development representative",
+  "bdr",
+];
+
+/**
+ * Mirrors the server-side leadGenJobs.js validation for a valid
+ * auto-send agent. Client-side filter is UX only — the backend
+ * re-validates and returns 400/404 with a specific error code if
+ * anything slips through.
+ */
+function isEligibleAutoSendAgent(agent) {
+  if (!agent) return false;
+  const role = String(agent.role || "").trim().toLowerCase();
+  if (!ALLOWED_BDR_ROLES.includes(role)) return false;
+  if (agent.isActive === false) return false;
+
+  const persona = String(agent.persona || "").trim();
+  if (!persona || persona === "Empty") return false;
+
+  const services = Array.isArray(agent.services) ? agent.services : [];
+  if (services.length === 0) return false;
+  if (services.length === 1 && services[0] === "Empty") return false;
+
+  return true;
+}
 
 export default function NewSearch() {
   const nav = useNavigate();
@@ -46,12 +72,21 @@ export default function NewSearch() {
   const [headcount, setHeadcount] = useState([]);
   const [keywords, setKeywords] = useState("");
   const [datePosted, setDatePosted] = useState("past_month");
- 
 
   // Schedule state
   const [scheduleEnabled, setScheduleEnabled] = useState(false);
   const [intervalDays, setIntervalDays] = useState(7);
   const [scheduleName, setScheduleName] = useState("");
+
+  // Auto-send state
+  const [autoSendEnabled, setAutoSendEnabled] = useState(false);
+  const [autoSendAgentId, setAutoSendAgentId] = useState("");
+  const [bdrAgents, setBdrAgents] = useState([]);
+  const [bdrAgentsLoading, setBdrAgentsLoading] = useState(false);
+
+  // Entitlement state (fetched from /auth/me)
+  const [hasMeetingMakerPlan, setHasMeetingMakerPlan] = useState(false);
+  const [entitlementLoaded, setEntitlementLoaded] = useState(false);
 
   // Pre-fill state
   const [prefillSource, setPrefillSource] = useState(null);
@@ -59,12 +94,64 @@ export default function NewSearch() {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
 
+  // ── Fetch entitlement (drives the auto-send card visibility) ──
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const data = await api.get("/auth/me");
+        if (cancelled) return;
+        const client = data?.client || {};
+        const eligible =
+          client.leadGenSubscribed === true &&
+          typeof client.plan === "string" &&
+          client.plan !== "free";
+        setHasMeetingMakerPlan(eligible);
+      } catch (err) {
+        // Non-fatal — the auto-send card simply stays hidden.
+        console.warn("Failed to load entitlement:", err?.message);
+      } finally {
+        if (!cancelled) setEntitlementLoaded(true);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // ── Fetch BDR agents (only when the entitlement is present) ──
+  useEffect(() => {
+    if (!hasMeetingMakerPlan) return;
+    let cancelled = false;
+    setBdrAgentsLoading(true);
+    (async () => {
+      try {
+        const data = await api.get("/api/agents");
+        if (cancelled) return;
+        const all = Array.isArray(data?.agents) ? data.agents : [];
+        const eligible = all.filter(isEligibleAutoSendAgent);
+        setBdrAgents(eligible);
+        // Preselect if there's exactly one — saves a click
+        if (eligible.length === 1 && !autoSendAgentId) {
+          setAutoSendAgentId(String(eligible[0]._id));
+        }
+      } catch (err) {
+        console.warn("Failed to load BDR agents:", err?.message);
+      } finally {
+        if (!cancelled) setBdrAgentsLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hasMeetingMakerPlan]);
+
   // ── Pre-fill from the most recent completed search ──
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-
         const data = await api.get("/api/leadgen/jobs?limit=20");
         if (cancelled) return;
         // Pre-fill from the most recent non-failed job — includes queued and
@@ -127,7 +214,9 @@ export default function NewSearch() {
     setHeadcount([]);
     setKeywords("");
     setDatePosted("past_month");
-    setLimit(10);
+    // NOTE: no setLimit here — limit is not a state variable; the
+    // payload hardcodes limit: 20. (Previous versions called
+    // setLimit(10) which threw ReferenceError.)
     setPrefillSource(null);
     setError("");
   }
@@ -164,7 +253,7 @@ export default function NewSearch() {
         services: cleanServices,
         icp,
         datePosted,
-        limit:20,
+        limit: 20,
       },
     };
   }
@@ -179,10 +268,30 @@ export default function NewSearch() {
       return;
     }
 
+    // Auto-send is one-off only. If somehow both are on (e.g. user
+    // toggled auto-send, then toggled schedule without clearing), refuse
+    // rather than silently dropping the flag.
+    if (scheduleEnabled && autoSendEnabled) {
+      setError(
+        "Auto-send is only available for one-off searches. Turn off the schedule to enable it."
+      );
+      return;
+    }
+
+    // Auto-send guard: agent must be selected
+    if (autoSendEnabled && !autoSendAgentId) {
+      setError(
+        "Pick a BDR agent to auto-send leads to, or uncheck 'Send to Meeting Maker automatically'."
+      );
+      return;
+    }
+
     setSubmitting(true);
     try {
       if (scheduleEnabled) {
         // Create a recurring schedule instead of an immediate job.
+        // Auto-send is deliberately not sent here — scheduled-searches
+        // route does not support it yet.
         const data = await api.post("/api/leadgen/scheduled-searches", {
           ...built.payload,
           intervalDays,
@@ -194,8 +303,15 @@ export default function NewSearch() {
         );
         nav("/searches");
       } else {
-        // Start a one-off job, as before.
-        const data = await api.post("/api/leadgen/jobs", built.payload);
+        // Build the job payload. Auto-send fields only added when
+        // the user opted in — otherwise the route treats them as
+        // defaults (false / null).
+        const payload = { ...built.payload };
+        if (autoSendEnabled) {
+          payload.autoSendToMeetingMaker = true;
+          payload.sendToMeetingMakerAgentId = autoSendAgentId;
+        }
+        const data = await api.post("/api/leadgen/jobs", payload);
         nav(`/searches/${data.jobId}`);
       }
     } catch (err) {
@@ -205,6 +321,33 @@ export default function NewSearch() {
         setError("Provide at least one of: titles, industries, or locations.");
       } else if (err.code === "invalid_interval") {
         setError("Pick a valid repeat interval.");
+      } else if (err.code === "meetingmaker_plan_required") {
+        // API client deliberately does NOT auto-redirect for this 402
+        // (see client.js comment). Show inline so the user knows
+        // exactly why auto-send was rejected.
+        setError(
+          "Auto-send requires a paid Meeting Maker plan. Upgrade to enable this feature."
+        );
+      } else if (err.code === "invalid_agent_id") {
+        setError(
+          "Select a valid BDR agent before enabling auto-send."
+        );
+      } else if (err.code === "agent_not_found") {
+        setError(
+          "The selected agent no longer exists. Pick another agent."
+        );
+      } else if (err.code === "agent_inactive") {
+        setError(
+          "The selected agent is inactive. Activate it or pick another."
+        );
+      } else if (err.code === "agent_role_not_bdr") {
+        setError(
+          "The selected agent is not a BDR. Pick a Business Development Representative agent."
+        );
+      } else if (err.code === "agent_not_configured") {
+        setError(
+          "The selected agent isn't fully configured. Add a persona and services before using it for auto-send."
+        );
       } else {
         setError(err.message || "Failed to submit.");
       }
@@ -224,6 +367,11 @@ export default function NewSearch() {
     ? formatDate(addDays(new Date(), intervalDays))
     : null;
 
+  // Show the auto-send card only when the user could plausibly use it.
+  // Entitlement drives visibility; the card itself is disabled when
+  // a schedule is on (auto-send + schedule don't combine yet).
+  const showAutoSendCard = entitlementLoaded && hasMeetingMakerPlan;
+
   return (
     <div className="max-w-4xl mx-auto p-6">
       <div className="mb-4">
@@ -237,9 +385,9 @@ export default function NewSearch() {
       </h1>
       <p className="text-sm text-gray-500 mb-4">
         {scheduleEnabled
-            ? `Runs automatically ${intervalLabel(intervalDays)}. Each run takes 10–30 minutes and returns up to 20 high-intent leads.`
-            : "A search takes 10–30 minutes. It returns up to 20 high-intent leads. Most searches return 1–5; a richer brief returns more."}
-        </p>
+          ? `Runs automatically ${intervalLabel(intervalDays)}. Each run takes 10–30 minutes and returns up to 20 high-intent leads.`
+          : "A search takes 10–30 minutes. It returns up to 20 high-intent leads. Most searches return 1–5; a richer brief returns more."}
+      </p>
 
       {prefillSource && (
         <div className="bg-blue-50 border border-blue-200 rounded p-3 mb-4 flex items-start gap-3">
@@ -403,6 +551,79 @@ export default function NewSearch() {
             </div>
           </div>
         </div>
+
+        {showAutoSendCard && (
+          <div className="card p-6">
+            <div className="flex items-start gap-3">
+              <input
+                id="auto-send-toggle"
+                type="checkbox"
+                checked={autoSendEnabled}
+                onChange={(e) => setAutoSendEnabled(e.target.checked)}
+                disabled={scheduleEnabled}
+                className="mt-1"
+                style={{ width: 18, height: 18 }}
+              />
+              <div className="flex-1">
+                <label
+                  htmlFor="auto-send-toggle"
+                  className={`block font-semibold ${
+                    scheduleEnabled ? "cursor-not-allowed text-gray-500" : "cursor-pointer"
+                  }`}
+                >
+                  Send to Meeting Maker automatically
+                </label>
+                <p className="text-xs text-gray-500 mt-1">
+                  When this search finishes, the leads will be added to
+                  Meeting Maker and assigned to the agent you pick below.
+                  {scheduleEnabled
+                    ? " (Not available for scheduled searches — you can send results manually from the search detail page after each run.)"
+                    : ""}
+                </p>
+
+                {!scheduleEnabled && autoSendEnabled && (
+                  <div className="mt-4 space-y-3">
+                    {bdrAgentsLoading ? (
+                      <p className="text-sm text-gray-500">Loading agents…</p>
+                    ) : bdrAgents.length === 0 ? (
+                      <div className="bg-yellow-50 border border-yellow-200 rounded p-3 text-sm text-yellow-800">
+                        You don't have any configured BDR agents. Add a
+                        Business Development Representative agent before
+                        using auto-send.
+                      </div>
+                    ) : (
+                      <>
+                        <div>
+                          <label className="block text-sm font-medium mb-1">
+                            Assign to agent
+                          </label>
+                          <select
+                            value={autoSendAgentId}
+                            onChange={(e) => setAutoSendAgentId(e.target.value)}
+                            className="w-full px-3 py-2 border rounded bg-white"
+                          >
+                            <option value="">— Select an agent —</option>
+                            {bdrAgents.map((a) => (
+                              <option key={String(a._id)} value={String(a._id)}>
+                                {a.name || "(unnamed agent)"}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                        <div className="bg-gray-50 border border-gray-200 rounded p-3 text-xs text-gray-700">
+                          Every lead this search produces will count against
+                          the selected agent's quota. Leads already in
+                          Meeting Maker for this client are skipped
+                          automatically.
+                        </div>
+                      </>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
 
         <div className="card p-6">
           <div className="flex items-start gap-3">
